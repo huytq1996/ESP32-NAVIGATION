@@ -1,8 +1,23 @@
+#include <Arduino.h>
 #include <Adafruit_GFX.h>     // Thư viện đồ họa Adafruit
 #include <Adafruit_ST7735.h>  // Include Adafruit Hardware-specific library for ST7735 display
 #include <SPI.h>              // Include Arduino SPI library
 #include <ChronosESP32.h>
+// define button
+#define BUTTON_PIN A0
+#define DEBOUNCE_TIME 50       // chống dội (ms)
+#define DOUBLE_CLICK_TIME 400  // tối đa để coi là double click (ms)
+#define LONG_PRESS_TIME 5000   // nhấn giữ 5 giây (ms)
+unsigned long lastDebounceTime = 0;
+unsigned long lastPressTime = 0;
+unsigned long pressStartTime = 0;
 
+bool buttonState = LOW;      // trạng thái hiện tại
+bool lastButtonState = LOW;  // trạng thái trước
+bool isLongPress = false;
+int clickCount = 0;
+
+#define SPEAKER A1
 // Color definitions
 #define BLUE 0x001F
 #define RED 0xF800
@@ -259,8 +274,40 @@ void myRingerHandler(String caller, bool incoming) {
     priority |= MASK_END_CALL;
   }
 }
+void print_wakeup_reason() {
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch (wakeup_reason) {
+    case ESP_SLEEP_WAKEUP_EXT0:
+      Serial.println("Wakeup caused by external signal using RTC_IO");
+      break;
+    case ESP_SLEEP_WAKEUP_EXT1:
+      Serial.println("Wakeup caused by external signal using RTC_CNTL");
+      break;
+    case ESP_SLEEP_WAKEUP_TIMER:
+      Serial.println("Wakeup caused by timer");
+      break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD:
+      Serial.println("Wakeup caused by touchpad");
+      break;
+    case ESP_SLEEP_WAKEUP_GPIO:  // 05 - this is used by ESP32-C3 as EXT0/EXT1 does not available in C3
+      Serial.println("Wakeup by GPIO");
+      break;
+    case ESP_SLEEP_WAKEUP_ULP:
+      Serial.println("Wakeup caused by ULP program");
+      break;
+    default:
+      Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
+      break;
+  }
+}
 void setup() {
   Serial.begin(115200);
+  /* Khởi tạo button*/
+  pinMode(BUTTON_PIN, INPUT);  // nút nhấn kéo xuống GND
+                               // Kiểm tra có phải vừa wakeup từ deep sleep
+  print_wakeup_reason();
+  /**/
   Serial.print(F("Hello! ST77xx TFT Test"));
 
   // KHỞI TẠO MÀN HÌNH OLED
@@ -289,14 +336,15 @@ unsigned long previous5s = 0;
 const long interval1s = 1000;  // 1 giây
 const long interval2s = 2000;  // 2 giây
 const long interval5s = 5000;  // 5 giây
+Notification *showNotification = nullptr;
+int mess_index = -1;
+bool timeOut_message = true;
 void UpdateDisplay() {
   StateDisplay displayState = TIME;
-  static Notification *showNotification = NULL;
   static bool oneTime = true;
   static unsigned long timeStart_time = 0;
   static bool timeOut_time = true;
   static unsigned long timeStart_message = 0;
-  static bool timeOut_message = true;
   static unsigned long timeStart_endcall = 0;
   static bool timeOut_endcall = true;
   unsigned long currentMillis = millis();
@@ -356,38 +404,36 @@ void UpdateDisplay() {
     case MESSAGE:
       {
 
+        static Notification n;
         if (timeOut_message) {
-          static Notification n;
           bool isInterrupt = true;
-          if (showNotification == NULL) {
-            Serial.println("showNotification == NULL");
+
+          if (showNotification == nullptr) {
             isInterrupt = dequeue(n);
             showNotification = &n;
-            Serial.println("showNotification: " + showNotification);
           } else {
-            Serial.println("showNotification != NULL");
             n = *showNotification;
           }
           if (isInterrupt) {
             Serial.println("show message");
             display.fillScreen(ST77XX_BLACK);
             uint8_t line = 0;
-            showText((SCREEN_WIDTH - myfont.getLength(n.app)) / 2, line, n.app, ST77XX_WHITE);
+            showText((SCREEN_WIDTH - myfont.getLength(n.app)) / 2, line, n.app + "  " + String(mess_index), ST77XX_WHITE);
             showText(0, line, n.title, ST77XX_WHITE);
             showText(0, line, n.message, ST77XX_WHITE);
             timeOut_message = false;
             timeStart_message = currentMillis;
           } else {
-            Serial.println("end message");
             priority &= ~MASK_MESS;
             timeOut_message = true;
             change = true;
-            showNotification = NULL;
+            showNotification = nullptr;
           }
         } else {
           if ((currentMillis - timeStart_message) > interval5s) {
             timeOut_message = true;
-            showNotification = NULL;
+            showNotification = nullptr;
+            mess_index = -1;
           }
         }
         break;
@@ -399,7 +445,6 @@ void UpdateDisplay() {
           display.fillScreen(ST77XX_BLACK);
           uint8_t line = 0;
           showText(0, line, F("Cuộc gọi đến từ: "), ST77XX_WHITE);
-
           oneTime = false;
         }
         break;
@@ -420,6 +465,7 @@ void UpdateDisplay() {
             priority &= ~MASK_CALL;
             priority &= ~MASK_END_CALL;
             change = true;
+            timeOut_message = true;
           }
         }
         break;
@@ -441,19 +487,91 @@ void task5s() {
 void loop() {
   watch.loop();  // handles internal routine functions
   UpdateDisplay();
+  static Notification mess;
+  /*Xử lí khi nhấn button */
+
+  bool reading = digitalRead(BUTTON_PIN);
+
+  // chống dội
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_TIME) {
+    if (reading != buttonState) {
+      buttonState = reading;
+
+      // nếu nhấn xuống
+      if (buttonState == HIGH) {
+        pressStartTime = millis();
+        isLongPress = false;
+      }
+      // nếu nhả ra
+      else {
+        unsigned long pressDuration = millis() - pressStartTime;
+
+        if (pressDuration >= 3000) {
+          Serial.println("Long Press (>=3s)");
+          isLongPress = true;
+          clickCount = 0;  // reset click
+          esp_deep_sleep_enable_gpio_wakeup(1 << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+          display.fillScreen(ST77XX_BLACK);
+          delay(5000);  // đợi serial gửi xong
+          esp_deep_sleep_start();
+        } else {
+          clickCount++;
+          lastPressTime = millis();
+        }
+      }
+    }
+  }
+
+  // xử lý single / double click
+  if (clickCount > 0 && (millis() - lastPressTime > DOUBLE_CLICK_TIME)) {
+    if (clickCount == 1 && !isLongPress) {
+      Serial.println("Single Click");
+      timeOut_message = true;
+      priority |= MASK_MESS;
+      mess_index++;
+      if (mess_index < getNotificationCount()) {
+        mess = watch.getNotificationAt(mess_index);
+        
+      } else {
+        mess_index = watch.getNotificationAt(0);
+      }
+      showNotification = &mess;
+    } else if (clickCount == 2) {
+      Serial.println("Double Click");
+      timeOut_message = true;
+      priority |= MASK_MESS;
+      mess_index--;
+      if (mess_index > -1 ) {
+        mess = watch.getNotificationAt(mess_index);
+        
+      } else {
+        mess_index = getNotificationCount() - 1;//????????????????????
+      }
+      showNotification = &mess;
+    }
+    clickCount = 0;
+  }
+
+  lastButtonState = reading;
+  /*kết thúc xử lí button*/
+
   // Kiểm tra cờ 'change' để cập nhật màn hình OLED
 
-  unsigned long currentMillis = millis();
-  if (currentMillis - previous1s >= interval1s) {
-    previous1s = currentMillis;  // reset mốc thời gian
-    task1s();
-  }
-  if (currentMillis - previous2s >= interval2s) {
-    previous2s = currentMillis;  // reset mốc thời gian
-    task2s();
-  }
-  if (currentMillis - previous5s >= interval5s) {
-    previous5s = currentMillis;  // reset mốc thời gian
-    task5s();
-  }
+  // unsigned long currentMillis = millis();
+  // if (currentMillis - previous1s >= interval1s) {
+  //   previous1s = currentMillis;  // reset mốc thời gian
+  //   task1s();
+  // }
+  // if (currentMillis - previous2s >= interval2s) {
+  //   previous2s = currentMillis;  // reset mốc thời gian
+  //   task2s();
+  // }
+  // if (currentMillis - previous5s >= interval5s) {
+  //   previous5s = currentMillis;  // reset mốc thời gian
+  //   task5s();
+  // }
 }
