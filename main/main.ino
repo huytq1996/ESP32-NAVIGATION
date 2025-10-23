@@ -1,23 +1,26 @@
 #include <Arduino.h>
-#include <Adafruit_GFX.h>     // Thư viện đồ họa Adafruit
-#include <Adafruit_ST7735.h>  // Include Adafruit Hardware-specific library for ST7735 display
-#include <SPI.h>              // Include Arduino SPI library
+#include <Adafruit_GFX.h>    // Thư viện đồ họa Adafruit
+#include <Adafruit_ST7735.h> // Include Adafruit Hardware-specific library for ST7735 display
+#include <SPI.h>             // Include Arduino SPI library
 #include <ChronosESP32.h>
 // define button
 #define BUTTON_PIN A0
-#define DEBOUNCE_TIME 50       // chống dội (ms)
-#define DOUBLE_CLICK_TIME 400  // tối đa để coi là double click (ms)
-#define LONG_PRESS_TIME 5000   // nhấn giữ 5 giây (ms)
+#define DEBOUNCE_TIME 50      // chống dội (ms)
+#define DOUBLE_CLICK_TIME 400 // tối đa để coi là double click (ms)
+#define LONG_PRESS_TIME 5000  // nhấn giữ 5 giây (ms)
+#define LED_MONITOR 10
+
 unsigned long lastDebounceTime = 0;
 unsigned long lastPressTime = 0;
 unsigned long pressStartTime = 0;
 
-bool buttonState = LOW;      // trạng thái hiện tại
-bool lastButtonState = LOW;  // trạng thái trước
+bool buttonState = LOW;     // trạng thái hiện tại
+bool lastButtonState = LOW; // trạng thái trước
 bool isLongPress = false;
 int clickCount = 0;
 
-#define SPEAKER A1
+#define BUZZER_PIN A1
+
 // Color definitions
 #define BLUE 0x001F
 #define RED 0xF800
@@ -32,15 +35,15 @@ int clickCount = 0;
 #define SCREEN_HEIGHT 160
 #define LINE_HEIGHT 16
 // Define ST7735 display pin connection
-#define TFT_RST 20  // Or set to -1 and connect to Arduino RESET pin
+#define TFT_RST 20 // Or set to -1 and connect to Arduino RESET pin
 #define TFT_CS 7
 #define TFT_DC 21
 Adafruit_ST7735 display = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
-Notification notify_fifo[NOTIF_SIZE];  // mảng lưu dữ liệu
-int head = 0;                          // vị trí ghi
-int tail = 0;                          // vị trí đọc
-int count = 0;                         // số phần tử hiện có
+Notification notify_fifo[NOTIF_SIZE]; // mảng lưu dữ liệu
+int head = 0;                         // vị trí ghi
+int tail = 0;                         // vị trí đọc
+int count = 0;                        // số phần tử hiện có
 uint8_t priority = 0;
 
 #define MASK_TIME 0x10
@@ -49,9 +52,10 @@ uint8_t priority = 0;
 #define MASK_CALL 0x02
 #define MASK_END_CALL 0x01
 // Thêm dữ liệu vào FIFO
-bool enqueue(Notification value) {
+bool enqueue(Notification value)
+{
   if (count == NOTIF_SIZE)
-    return false;  // đầy
+    return false; // đầy
   notify_fifo[head] = value;
   head = (head + 1) % NOTIF_SIZE;
   count++;
@@ -59,9 +63,10 @@ bool enqueue(Notification value) {
 }
 
 // Lấy dữ liệu từ FIFO
-bool dequeue(Notification &value) {
+bool dequeue(Notification &value)
+{
   if (count == 0)
-    return false;  // rỗng
+    return false; // rỗng
   value = notify_fifo[tail];
   tail = (tail + 1) % NOTIF_SIZE;
   count--;
@@ -69,11 +74,13 @@ bool dequeue(Notification &value) {
 }
 #include "FontMaker.h"
 
-void setpx(int16_t x, int16_t y, uint16_t color) {
-  display.drawPixel(x, y, color);  // Thay đổi hàm này thành hàm vẽ pixel mà thư viện led bạn dùng cung cấp
+void setpx(int16_t x, int16_t y, uint16_t color)
+{
+  display.drawPixel(x, y, color); // Thay đổi hàm này thành hàm vẽ pixel mà thư viện led bạn dùng cung cấp
 }
 
-enum StateDisplay {
+enum StateDisplay
+{
   DEFAULT_VALUE,
   NAVIGATION,
   TIME,
@@ -81,6 +88,18 @@ enum StateDisplay {
   CALLING,
   ENDCALL
 };
+enum BeepState
+{
+  IDLE,
+  BEEP1_ON,
+  BEEP1_OFF,
+  BEEP2_ON,
+  BEEP2_OFF,
+  DONE
+};
+
+BeepState beepState = IDLE;
+unsigned long previousMillis = 0;
 // StateDisplay displayState = TIME;
 // void set_displaystate(StateDisplay state) {
 //   if ((uint8_t)state > (uint8_t)displayState) {
@@ -89,7 +108,7 @@ enum StateDisplay {
 // }
 
 MakeFont myfont(&setpx);
-ChronosESP32 watch(F("Màn hình chỉ đường"));  // set the bluetooth name
+ChronosESP32 watch(F("Màn hình chỉ đường")); // set the bluetooth name
 
 bool change = false;
 uint32_t nav_crc = 0xFFFFFFFF;
@@ -98,20 +117,24 @@ bool time2s = false;
 bool time1s = false;
 // Thêm biến toàn cục để lưu trữ dữ liệu navigation và trạng thái
 Navigation currentNavData;
-bool isNavigationActive = false;  // Biến theo dõi trạng thái dẫn đường
-#define MAX_LINES 10              // số lượng phần tử tối đa muốn tách
-#define MAX_TOKENS 30             // số lượng phần tử tối đa muốn tách
+bool isNavigationActive = false; // Biến theo dõi trạng thái dẫn đường
+#define MAX_LINES 10             // số lượng phần tử tối đa muốn tách
+#define MAX_TOKENS 30            // số lượng phần tử tối đa muốn tách
 String displayContent[MAX_LINES];
-int split(String str, char delimiter, String out[]) {
+int split(String str, char delimiter, String out[])
+{
   uint8_t count = 0;
   int start = 0;
-  for (int i = 0; i < str.length(); i++) {
-    if (str.charAt(i) == ' ') {  // vẫn tách được theo khoảng trắng
+  for (int i = 0; i < str.length(); i++)
+  {
+    if (str.charAt(i) == ' ')
+    { // vẫn tách được theo khoảng trắng
       String word = str.substring(start, i);
       out[count] = word;
       start = i + 1;
       count++;
-      if (count == MAX_TOKENS) {
+      if (count == MAX_TOKENS)
+      {
         return count;
       }
     }
@@ -119,39 +142,47 @@ int split(String str, char delimiter, String out[]) {
   // In từ cuối cùng
   out[count] = str.substring(start);
 
-  return count + 1;  // trả về số phần tử đã tách
+  return count + 1; // trả về số phần tử đã tách
 }
-void showText(uint8_t start_x, uint8_t &line, String text, uint16_t color) {
+void showText(uint8_t start_x, uint8_t &line, String text, uint16_t color)
+{
   String messChar[MAX_TOKENS];
   String messLine[MAX_LINES];
   uint8_t numChar = split(text, ' ', messChar);
   uint8_t numLine = 0;
   uint8_t cntChar = 0;
 
-  do {
+  do
+  {
     String buffer;
     buffer = messChar[cntChar];
     cntChar++;
     messLine[numLine] = buffer;
-    while (cntChar < numChar) {
+    while (cntChar < numChar)
+    {
       buffer = buffer + " " + messChar[cntChar];
-      if (myfont.getLength(buffer) < (SCREEN_WIDTH - start_x)) {
+      if (myfont.getLength(buffer) < (SCREEN_WIDTH - start_x))
+      {
         messLine[numLine] = buffer;
         cntChar++;
-      } else {
+      }
+      else
+      {
         numLine++;
         break;
       }
     }
   } while (cntChar < numChar);
   numLine++;
-  for (int i = 0; i < numLine && i < MAX_LINES; i++) {
+  for (int i = 0; i < numLine && i < MAX_LINES; i++)
+  {
     myfont.print(start_x, line * LINE_HEIGHT, messLine[i], color, ST77XX_BLACK);
     line++;
   }
 }
 bool isBlueToothConnected = false;
-void connectionCallback(bool state) {
+void connectionCallback(bool state)
+{
   // Serial.print("Connection state: ");
   // Serial.println(state ? "Connected" : "Disconnected");
   isBlueToothConnected = state;
@@ -165,7 +196,8 @@ void connectionCallback(bool state) {
   display.println(state ? "Connected" : "Disconnected");
 }
 
-void notificationCallback(Notification notification) {
+void notificationCallback(Notification notification)
+{
   Serial.print("Notification received at ");
   Serial.println(notification.time);
   Serial.print("From: ");
@@ -177,12 +209,15 @@ void notificationCallback(Notification notification) {
   // displayState = MESSAGE;
   priority |= MASK_MESS;
   enqueue(notification);
+  startBeep();
 }
 
 // Hàm mới để cập nhật hiển thị OLED (bao gồm icon và văn bản)
-void updateNavigationDisplay() {
+void updateNavigationDisplay()
+{
   // Chỉ hiển thị nếu navigation đang hoạt động
-  if (!isNavigationActive) {
+  if (!isNavigationActive)
+  {
     display.fillScreen(ST77XX_BLACK);
     display.setTextSize(1);
     display.setTextColor(RED);
@@ -194,152 +229,166 @@ void updateNavigationDisplay() {
 
   // VẼ ICON ĐIỀU HƯỚNG
   // Vẽ icon ở góc trên bên trái (0,0) nếu có dữ liệu icon hợp lệ
-  if (nav_crc != 0xFFFFFFFF) {  // nav_crc = 0xFFFFFFFF nghĩa là chưa có icon nào được gửi
+  if (nav_crc != 0xFFFFFFFF)
+  { // nav_crc = 0xFFFFFFFF nghĩa là chưa có icon nào được gửi
     display.drawBitmap(0, 0, currentNavData.icon, 48, 48, ST77XX_WHITE);
-  } else {
+  }
+  else
+  {
     // Nếu không có icon, bạn có thể để trống hoặc vẽ một hình nền đen ở đó
     display.fillRect(0, 0, 48, 48, YELLOW);
   }
 
-  int text_start_x = 50;  // Bắt đầu văn bản từ cột 55 (bên phải icon 48px + khoảng trống)
+  int text_start_x = 50; // Bắt đầu văn bản từ cột 55 (bên phải icon 48px + khoảng trống)
   uint8_t line = 0;
   showText(text_start_x, line, currentNavData.duration + " nữa đến nơi", ST77XX_WHITE);
   line = 4;
+  if(currentNavData.title.indexOf("50m") != -1)
+  {
+    startBeep();
+  }
   showText(0, line, currentNavData.title + "--" + currentNavData.directions, ST77XX_WHITE);
   showText(0, line, "còn " + currentNavData.distance + " nữa", ST77XX_WHITE);
   showText(0, line, currentNavData.eta, ST77XX_WHITE);
 }
 
-void configCallback(Config config, uint32_t a, uint32_t b) {
-  switch (config) {
-    case CF_NAV_DATA:
-      Serial.print("Navigation state: ");
-      Serial.println(a ? "Active" : "Inactive");
-      isNavigationActive = a;  // Cập nhật trạng thái dẫn đường toàn cục
+void configCallback(Config config, uint32_t a, uint32_t b)
+{
+  switch (config)
+  {
+  case CF_NAV_DATA:
+    Serial.print("Navigation state: ");
+    Serial.println(a ? "Active" : "Inactive");
+    isNavigationActive = a; // Cập nhật trạng thái dẫn đường toàn cục
 
-      if (isNavigationActive)  // Nếu navigation active
+    if (isNavigationActive) // Nếu navigation active
+    {
+      currentNavData = watch.getNavigation(); // Lưu dữ liệu navigation vào biến toàn cục
+      // displayState = NAVIGATION;
+      priority |= MASK_NAVI;
+      Serial.println(currentNavData.directions);
+
+      Serial.println(currentNavData.eta);
+      Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 5]);
+      Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 5]);
+      Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 4]);
+      Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 4]);
+      Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 3]);
+      Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 3]);
+      Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 2]);
+      Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 2]);
+      Serial.println(currentNavData.duration);
+      Serial.println(currentNavData.distance);
+      Serial.println(currentNavData.title);
+      Serial.println(currentNavData.speed);
+      // In thêm next_step_distance nếu thư viện của bạn có
+      // Serial.println(currentNavData.next_step_distance);
+    }
+    else
+    {
+      priority &= ~MASK_NAVI;
+    }
+    change = true;
+    break;
+
+  case CF_NAV_ICON:
+    if (a == 2)
+    {                                             // Khi icon đã được truyền đầy đủ
+      Navigation tempNav = watch.getNavigation(); // Lấy dữ liệu icon
+      if (nav_crc != tempNav.iconCRC)             // Chỉ cập nhật nếu CRC thay đổi
       {
-        currentNavData = watch.getNavigation();  // Lưu dữ liệu navigation vào biến toàn cục
-        // displayState = NAVIGATION;
-        priority |= MASK_NAVI;
-        Serial.println(currentNavData.directions);
-
-        Serial.println(currentNavData.eta);
-        Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 5]);
-        Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 5]);
-        Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 4]);
-        Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 4]);
-        Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 3]);
-        Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 3]);
-        Serial.println((char)currentNavData.eta[currentNavData.eta.length() - 2]);
-        Serial.println((int)currentNavData.eta[currentNavData.eta.length() - 2]);
-        Serial.println(currentNavData.duration);
-        Serial.println(currentNavData.distance);
-        Serial.println(currentNavData.title);
-        Serial.println(currentNavData.speed);
-        // In thêm next_step_distance nếu thư viện của bạn có
-        // Serial.println(currentNavData.next_step_distance);
-      } else {
-        priority &= ~MASK_NAVI;
+        nav_crc = tempNav.iconCRC;
+        currentNavData = tempNav; // Lưu dữ liệu icon vào biến toàn cục
+        change = true;            // Đặt cờ để cập nhật hiển thị OLED
       }
-      change = true;
-      break;
-
-    case CF_NAV_ICON:
-      if (a == 2) {                                  // Khi icon đã được truyền đầy đủ
-        Navigation tempNav = watch.getNavigation();  // Lấy dữ liệu icon
-        if (nav_crc != tempNav.iconCRC)              // Chỉ cập nhật nếu CRC thay đổi
-        {
-          nav_crc = tempNav.iconCRC;
-          currentNavData = tempNav;  // Lưu dữ liệu icon vào biến toàn cục
-          change = true;             // Đặt cờ để cập nhật hiển thị OLED
-        }
-      }
-      break;
+    }
+    break;
   }
 }
 // Callback function
-void myRingerHandler(String caller, bool incoming) {
+void myRingerHandler(String caller, bool incoming)
+{
   display.fillScreen(ST77XX_BLACK);
   uint8_t line = 0;
-  if (incoming) {
+  if (incoming)
+  {
 
     Serial.println("Cuộc gọi đến từ: " + caller);
     showText(0, line, F("Cuộc gọi đến từ: "), ST77XX_WHITE);
     showText(0, line, caller, ST77XX_WHITE);
     priority |= MASK_CALL;
-  } else {
+  }
+  else
+  {
     Serial.println(F("Cuộc gọi đã kết thúc hoặc bị từ chối"));
     showText(0, line, F("Cuộc gọi đã kết thúc hoặc bị từ chối"), RED);
     priority |= MASK_END_CALL;
   }
 }
-void print_wakeup_reason() {
+void wakeup()
+{
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
-  switch (wakeup_reason) {
-    case ESP_SLEEP_WAKEUP_EXT0:
-      Serial.println("Wakeup caused by external signal using RTC_IO");
-      break;
-    case ESP_SLEEP_WAKEUP_EXT1:
-      Serial.println("Wakeup caused by external signal using RTC_CNTL");
-      break;
-    case ESP_SLEEP_WAKEUP_TIMER:
-      Serial.println("Wakeup caused by timer");
-      break;
-    case ESP_SLEEP_WAKEUP_TOUCHPAD:
-      Serial.println("Wakeup caused by touchpad");
-      break;
-    case ESP_SLEEP_WAKEUP_GPIO:  // 05 - this is used by ESP32-C3 as EXT0/EXT1 does not available in C3
-      Serial.println("Wakeup by GPIO");
-      break;
-    case ESP_SLEEP_WAKEUP_ULP:
-      Serial.println("Wakeup caused by ULP program");
-      break;
-    default:
-      Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
-      break;
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO)
+  {
+    pressStartTime = millis();
+    while (digitalRead(BUTTON_PIN))
+    {
+      if (millis() - pressStartTime > 2000)
+      {
+        return;
+      }
+    }
+    esp_deep_sleep_enable_gpio_wakeup(1 << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+    esp_deep_sleep_start();
   }
 }
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   /* Khởi tạo button*/
-  pinMode(BUTTON_PIN, INPUT);  // nút nhấn kéo xuống GND
-                               // Kiểm tra có phải vừa wakeup từ deep sleep
-  print_wakeup_reason();
+  pinMode(BUTTON_PIN, INPUT); // nút nhấn kéo xuống GND
+  pinMode(LED_MONITOR, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(LED_MONITOR, HIGH);
+  // Kiểm tra có phải vừa wakeup từ deep sleep
+
+  wakeup();
   /**/
   Serial.print(F("Hello! ST77xx TFT Test"));
 
   // KHỞI TẠO MÀN HÌNH OLED
 
-  display.initR(INITR_BLACKTAB);  // Init ST7735S chip, black tab
+  display.initR(INITR_BLACKTAB); // Init ST7735S chip, black tab
   myfont.set_font(MakeFont_Font1);
   // Cài đặt hiển thị ban đầu
   display.fillScreen(ST77XX_BLACK);
   display.println(F("Chronos Nav Ready!"));
   //   display.display();
-  delay(2000);  // Hiển thị trong 2 giây
-
+  delay(2000); // Hiển thị trong 2 giây
   // set the callbacks before calling begin funtion
   watch.setConnectionCallback(connectionCallback);
   watch.setNotificationCallback(notificationCallback);
   watch.setConfigurationCallback(configCallback);
   watch.setRingerCallback(myRingerHandler);
-  watch.begin();                       // initializes the BLE
-  Serial.println(watch.getAddress());  // mac address, call after begin()
+  watch.begin();                      // initializes the BLE
+  Serial.println(watch.getAddress()); // mac address, call after begin()
 
-  watch.setBattery(80);  // set the battery level, will be synced to the app
+  watch.setBattery(80); // set the battery level, will be synced to the app
 }
 unsigned long previous1s = 0;
 unsigned long previous2s = 0;
 unsigned long previous5s = 0;
-const long interval1s = 1000;  // 1 giây
-const long interval2s = 2000;  // 2 giây
-const long interval5s = 5000;  // 5 giây
+const long interval1s = 1000; // 1 giây
+const long interval2s = 2000; // 2 giây
+const long interval5s = 5000; // 5 giây
+const long interval8s = 8000; // 8 giây
 Notification *showNotification = nullptr;
 int mess_index = -1;
 bool timeOut_message = true;
-void UpdateDisplay() {
+void UpdateDisplay()
+{
   StateDisplay displayState = TIME;
   static bool oneTime = true;
   static unsigned long timeStart_time = 0;
@@ -348,144 +397,236 @@ void UpdateDisplay() {
   static unsigned long timeStart_endcall = 0;
   static bool timeOut_endcall = true;
   unsigned long currentMillis = millis();
-  if ((priority & MASK_END_CALL) != 0) {
+  if ((priority & MASK_END_CALL) != 0)
+  {
     displayState = ENDCALL;
-  } else if ((priority & MASK_CALL) != 0) {
+  }
+  else if ((priority & MASK_CALL) != 0)
+  {
     displayState = CALLING;
-  } else if ((priority & MASK_MESS) != 0) {
+  }
+  else if ((priority & MASK_MESS) != 0)
+  {
     displayState = MESSAGE;
-  } else if ((priority & MASK_NAVI) != 0) {
+  }
+  else if ((priority & MASK_NAVI) != 0)
+  {
     displayState = NAVIGATION;
-  } else if ((priority & MASK_TIME) != 0) {
+  }
+  else if ((priority & MASK_TIME) != 0)
+  {
     displayState = TIME;
   }
-  switch (displayState) {
-    case NAVIGATION:
-      {
-        if (change) {
-          Serial.println("show NAVIGATION");
-          display.fillScreen(ST77XX_BLACK);
-          updateNavigationDisplay();  // Gọi hàm cập nhật hiển thị
-          change = false;             // Reset cờ để chỉ cập nhật khi có thay đổi mới
-        }
-        break;
-      }
-    case TIME:
-      {
+  switch (displayState)
+  {
+  case NAVIGATION:
+  {
+    if (change)
+    {
+      Serial.println("show NAVIGATION");
+      display.fillScreen(ST77XX_BLACK);
+      updateNavigationDisplay(); // Gọi hàm cập nhật hiển thị
+      change = false;            // Reset cờ để chỉ cập nhật khi có thay đổi mới
+    }
+    break;
+  }
+  case TIME:
+  {
 
-        if (timeOut_time) {
-          display.fillScreen(ST77XX_BLACK);
-          Serial.println("chỉ hiện thời gian");
-          display.setTextSize(4);
-          display.setTextColor(isBlueToothConnected ? GREEN : YELLOW);
-          String hour = watch.getHourZ() + watch.getTime(":%M");
-          int16_t x1, y1;
-          uint16_t w, h;
-          // Tính kích thước chuỗi
-          display.getTextBounds(hour, 0, 0, &x1, &y1, &w, &h);
-          int16_t x = (SCREEN_WIDTH - w) / 2;
-          int16_t y = (SCREEN_HEIGHT - h) / 2;
-          display.setCursor(x, y - 20);
-          display.println(hour);
-          display.getTextBounds(watch.getAmPmC(), 0, 0, &x1, &y1, &w, &h);
-          x = (SCREEN_WIDTH - w) / 2;
-          y = (SCREEN_HEIGHT - h) / 2;
-          display.setCursor(x, y + h + 3);
-          display.println(watch.getAmPmC());
-          timeOut_time = false;
-          timeStart_time = currentMillis;
-        } else {
-          if ((currentMillis - timeStart_time) > interval5s) {
-            timeOut_time = true;
-          }
-        }
-        break;
-      }
-    case MESSAGE:
+    if (timeOut_time)
+    {
+      display.fillScreen(ST77XX_BLACK);
+      Serial.println("chỉ hiện thời gian");
+      display.setTextSize(4);
+      display.setTextColor(isBlueToothConnected ? GREEN : YELLOW);
+      String hour = watch.getHourZ() + watch.getTime(":%M");
+      int16_t x1, y1;
+      uint16_t w, h;
+      // Tính kích thước chuỗi
+      display.getTextBounds(hour, 0, 0, &x1, &y1, &w, &h);
+      int16_t x = (SCREEN_WIDTH - w) / 2;
+      int16_t y = (SCREEN_HEIGHT - h) / 2;
+      display.setCursor(x, y - 20);
+      display.println(hour);
+      display.getTextBounds(watch.getAmPmC(), 0, 0, &x1, &y1, &w, &h);
+      x = (SCREEN_WIDTH - w) / 2;
+      y = (SCREEN_HEIGHT - h) / 2;
+      display.setCursor(x, y + h + 3);
+      display.println(watch.getAmPmC());
+      timeOut_time = false;
+      timeStart_time = currentMillis;
+    }
+    else
+    {
+      if ((currentMillis - timeStart_time) > interval5s)
       {
-
-        static Notification n;
-        if (timeOut_message) {
-          bool isInterrupt = true;
-
-          if (showNotification == nullptr) {
-            isInterrupt = dequeue(n);
-            showNotification = &n;
-          } else {
-            n = *showNotification;
-          }
-          if (isInterrupt) {
-            Serial.println("show message");
-            display.fillScreen(ST77XX_BLACK);
-            uint8_t line = 0;
-            showText((SCREEN_WIDTH - myfont.getLength(n.app)) / 2, line, n.app + "  " + String(mess_index), ST77XX_WHITE);
-            showText(0, line, n.title, ST77XX_WHITE);
-            showText(0, line, n.message, ST77XX_WHITE);
-            timeOut_message = false;
-            timeStart_message = currentMillis;
-          } else {
-            priority &= ~MASK_MESS;
-            timeOut_message = true;
-            change = true;
-            showNotification = nullptr;
-          }
-        } else {
-          if ((currentMillis - timeStart_message) > interval5s) {
-            timeOut_message = true;
-            showNotification = nullptr;
-            mess_index = -1;
-          }
-        }
-        break;
+        timeOut_time = true;
       }
+    }
+    break;
+  }
+  case MESSAGE:
+  {
 
-    case CALLING:
+    static Notification n;
+    if (timeOut_message)
+    {
+      bool isInterrupt = true;
+
+      if (showNotification == nullptr)
       {
-        if (oneTime) {
-          display.fillScreen(ST77XX_BLACK);
-          uint8_t line = 0;
-          showText(0, line, F("Cuộc gọi đến từ: "), ST77XX_WHITE);
-          oneTime = false;
-        }
-        break;
+        isInterrupt = dequeue(n);
+        showNotification = &n;
       }
-    case ENDCALL:
+      else
       {
-
-        if (timeOut_endcall) {
-          display.fillScreen(ST77XX_BLACK);
-          uint8_t line = 0;
-          showText(0, line, F("Cuộc gọi đã kết thúc hoặc bị từ chối"), RED);
-          timeOut_endcall = false;
-          timeStart_endcall = currentMillis;
-          oneTime = true;
-        } else {
-          if ((currentMillis - timeStart_endcall) > interval2s) {
-            timeOut_endcall = true;
-            priority &= ~MASK_CALL;
-            priority &= ~MASK_END_CALL;
-            change = true;
-            timeOut_message = true;
-          }
-        }
-        break;
+        n = *showNotification;
       }
-    default:
-      break;
+      if (isInterrupt)
+      {
+        Serial.println("show message");
+        display.fillScreen(ST77XX_BLACK);
+        uint8_t line = 0;
+        showText((SCREEN_WIDTH - myfont.getLength(n.app)) / 2, line, n.app + "  " + String(mess_index), ST77XX_WHITE);
+        showText(0, line, n.title, ST77XX_WHITE);
+        showText(0, line, n.message, ST77XX_WHITE);
+        timeOut_message = false;
+        timeStart_message = currentMillis;
+      }
+      else
+      {
+        priority &= ~MASK_MESS;
+        timeOut_message = true;
+        change = true;
+        showNotification = nullptr;
+      }
+    }
+    else
+    {
+      if ((currentMillis - timeStart_message) > interval8s)
+      {
+        timeOut_message = true;
+        showNotification = nullptr;
+        mess_index = -1;
+      }
+    }
+    break;
+  }
+
+  case CALLING:
+  {
+    if (oneTime)
+    {
+      display.fillScreen(ST77XX_BLACK);
+      uint8_t line = 0;
+      showText(0, line, F("Cuộc gọi đến từ: "), ST77XX_WHITE);
+      oneTime = false;
+      startBeep();
+    }
+    break;
+  }
+  case ENDCALL:
+  {
+
+    if (timeOut_endcall)
+    {
+      display.fillScreen(ST77XX_BLACK);
+      uint8_t line = 0;
+      showText(0, line, F("Cuộc gọi đã kết thúc hoặc bị từ chối"), RED);
+      timeOut_endcall = false;
+      timeStart_endcall = currentMillis;
+      oneTime = true;
+      startBeep();
+    }
+    else
+    {
+      if ((currentMillis - timeStart_endcall) > interval2s)
+      {
+        timeOut_endcall = true;
+        priority &= ~MASK_CALL;
+        priority &= ~MASK_END_CALL;
+        change = true;
+        timeOut_message = true;
+      }
+    }
+    break;
+  }
+  default:
+    break;
   }
 }
-void task1s() {
-  time1s = true;
+
+
+void startBeep()
+{
+  beepState = BEEP1_ON;
+  previousMillis = millis();
+  digitalWrite(BUZZER_PIN, HIGH);
 }
-void task2s() {
+void handleBeep()
+{
+  unsigned long currentMillis = millis();
+
+  switch (beepState)
+  {
+  case BEEP1_ON:
+    if (currentMillis - previousMillis >= 500)
+    { // 500ms kêu
+      digitalWrite(BUZZER_PIN, LOW);
+      beepState = BEEP1_OFF;
+      previousMillis = currentMillis;
+      display.invertDisplay(true);
+    }
+    break;
+
+  case BEEP1_OFF:
+    if (currentMillis - previousMillis >= 100)
+    { // nghỉ 100ms
+      digitalWrite(BUZZER_PIN, HIGH);
+      beepState = BEEP2_ON;
+      previousMillis = currentMillis;
+      display.invertDisplay(false);
+    }
+    break;
+
+  case BEEP2_ON:
+    if (currentMillis - previousMillis >= 500)
+    { // 500ms kêu
+      digitalWrite(BUZZER_PIN, LOW);
+      beepState = BEEP2_OFF;
+      previousMillis = currentMillis;
+      display.invertDisplay(true);
+    }
+    break;
+
+  case BEEP2_OFF:
+    if (currentMillis - previousMillis >= 100)
+    {
+      beepState = DONE; // kết thúc
+      display.invertDisplay(false);
+    }
+    break;
+
+  case DONE:
+    // Không làm gì nữa
+    break;
+
+  default:
+    break;
+  }
+}
+void task2s()
+{
   time2s = true;
 }
-void task5s() {
+void task5s()
+{
   time5s = true;
 }
 
-void loop() {
-  watch.loop();  // handles internal routine functions
+void loop()
+{
+  watch.loop(); // handles internal routine functions
   UpdateDisplay();
   static Notification mess;
   /*Xử lí khi nhấn button */
@@ -493,32 +634,42 @@ void loop() {
   bool reading = digitalRead(BUTTON_PIN);
 
   // chống dội
-  if (reading != lastButtonState) {
+  if (reading != lastButtonState)
+  {
     lastDebounceTime = millis();
   }
 
-  if ((millis() - lastDebounceTime) > DEBOUNCE_TIME) {
-    if (reading != buttonState) {
+  if ((millis() - lastDebounceTime) > DEBOUNCE_TIME)
+  {
+    if (reading != buttonState)
+    {
       buttonState = reading;
 
       // nếu nhấn xuống
-      if (buttonState == HIGH) {
+      if (buttonState == HIGH)
+      {
         pressStartTime = millis();
         isLongPress = false;
       }
       // nếu nhả ra
-      else {
+      else
+      {
         unsigned long pressDuration = millis() - pressStartTime;
 
-        if (pressDuration >= 3000) {
+        if (pressDuration >= 2000)
+        {
           Serial.println("Long Press (>=3s)");
           isLongPress = true;
-          clickCount = 0;  // reset click
+          clickCount = 0; // reset click
           esp_deep_sleep_enable_gpio_wakeup(1 << BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+          display.fillScreen(ST77XX_WHITE);
+          delay(1000);
           display.fillScreen(ST77XX_BLACK);
-          delay(5000);  // đợi serial gửi xong
+          delay(2000);
           esp_deep_sleep_start();
-        } else {
+        }
+        else
+        {
           clickCount++;
           lastPressTime = millis();
         }
@@ -527,36 +678,57 @@ void loop() {
   }
 
   // xử lý single / double click
-  if (clickCount > 0 && (millis() - lastPressTime > DOUBLE_CLICK_TIME)) {
-    if (clickCount == 1 && !isLongPress) {
+  if (clickCount > 0 && (millis() - lastPressTime > DOUBLE_CLICK_TIME))
+  {
+    if (clickCount == 1 && !isLongPress)
+    {
       Serial.println("Single Click");
-      timeOut_message = true;
-      priority |= MASK_MESS;
-      mess_index++;
-      if (mess_index < getNotificationCount()) {
-        mess = watch.getNotificationAt(mess_index);
-        
-      } else {
-        mess_index = watch.getNotificationAt(0);
+      Serial.println(watch.getNotificationCount());
+      int count = watch.getNotificationCount() - 1;
+      if (count > 0)
+      {
+        timeOut_message = true;
+        priority |= MASK_MESS;
+        mess_index++;
+        if (mess_index < count)
+        {
+          mess = watch.getNotificationAt(mess_index);
+        }
+        else
+        {
+          mess_index = 0;
+          mess = watch.getNotificationAt(mess_index);
+        }
+        showNotification = &mess;
       }
-      showNotification = &mess;
-    } else if (clickCount == 2) {
+    }
+    else if (clickCount == 2)
+    {
       Serial.println("Double Click");
-      timeOut_message = true;
-      priority |= MASK_MESS;
-      mess_index--;
-      if (mess_index > -1 ) {
-        mess = watch.getNotificationAt(mess_index);
-        
-      } else {
-        mess_index = getNotificationCount() - 1;//????????????????????
+      Serial.println(watch.getNotificationCount());
+      int count = watch.getNotificationCount() - 1;
+      if (count > 0)
+      {
+        timeOut_message = true;
+        priority |= MASK_MESS;
+        mess_index--;
+        if (mess_index > -1)
+        {
+          mess = watch.getNotificationAt(mess_index);
+        }
+        else
+        {
+          mess_index = count - 1; //
+          mess = watch.getNotificationAt(mess_index);
+        }
+        showNotification = &mess;
       }
-      showNotification = &mess;
     }
     clickCount = 0;
   }
 
   lastButtonState = reading;
+  handleBeep();
   /*kết thúc xử lí button*/
 
   // Kiểm tra cờ 'change' để cập nhật màn hình OLED
